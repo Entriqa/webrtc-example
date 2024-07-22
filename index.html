@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebRTC Stream to Janus</title>
+    <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
+    <script src="janus.js"></script>
+</head>
+<body>
+    <video id="localVideo" autoplay muted></video>
+    <button id="startRecording">Start Recording</button>
+    <button id="stopRecording" disabled>Stop Recording</button>
+    <script>
+        if (typeof Janus === 'undefined') {
+            console.error("Janus library not loaded!");
+        } else {
+            var janus = null;
+            var streaming = null;
+            var opaqueId = "streamingtest-" + Janus.randomString(12);
+            var secret = "janusrocks";
+
+            var mediaRecorder;
+            var recordedBlobs;
+
+            Janus.init({
+                debug: "all",
+                callback: function() {
+                    janus = new Janus({
+                        server: "http://localhost:8088/janus",
+                        apisecret: secret,
+                        success: function() {
+                            janus.attach({
+                                plugin: "janus.plugin.streaming",
+                                opaqueId: opaqueId,
+                                success: function(pluginHandle) {
+                                    streaming = pluginHandle;
+                                    console.log("Plugin attached! (" + streaming.getPlugin() + ", id=" + streaming.getId() + ")");
+                                    startStream();
+                                },
+                                error: function(error) {
+                                    console.error("Error attaching plugin: ", error);
+                                },
+                                onmessage: function(msg, jsep) {
+                                    console.log("Got a message: ", msg);
+                                    if (jsep !== undefined && jsep !== null) {
+                                        streaming.handleRemoteJsep({ jsep: jsep });
+                                    }
+                                },
+                                onlocalstream: function(stream) {
+                                    Janus.attachMediaStream(document.getElementById('localVideo'), stream);
+                                }
+                            });
+                        },
+                        error: function(error) {
+                            console.error("Error initializing Janus: ", error);
+                        }
+                    });
+                }
+            });
+
+            function startStream() {
+                navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+                .then(function(stream) {
+                    var videoElement = document.getElementById("localVideo");
+                    videoElement.srcObject = stream;
+                    console.log("Got user media stream");
+
+                    streaming.createOffer({
+                        media: { video: true, audio: true },
+                        stream: stream,
+                        success: function(jsep) {
+                            console.log("Got SDP!", jsep);
+                            var body = { request: "create", type: "rtp", id: 1 };
+                            streaming.send({ message: body, jsep: jsep });
+                        },
+                        error: function(error) {
+                            console.error("Error creating offer: ", error);
+                        }
+                    });
+
+                    recordedBlobs = [];
+                    try {
+                        mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm; codecs=vp9' });
+                    } catch (e) {
+                        console.error('Exception while creating MediaRecorder:', e);
+                        return;
+                    }
+                    console.log('Created MediaRecorder', mediaRecorder, 'with options', { mimeType: 'video/webm; codecs=vp9' });
+
+                    mediaRecorder.onstop = (event) => {
+                        console.log('Recorder stopped: ', event);
+                        const blob = new Blob(recordedBlobs, { type: 'video/webm' });
+                        uploadVideo(blob);
+                    };
+
+                    mediaRecorder.ondataavailable = handleDataAvailable;
+
+                    document.getElementById('startRecording').onclick = () => {
+                        recordedBlobs = [];
+                        mediaRecorder.start(10);
+                        console.log('MediaRecorder started', mediaRecorder);
+                        document.getElementById('startRecording').disabled = true;
+                        document.getElementById('stopRecording').disabled = false;
+                    };
+
+                    document.getElementById('stopRecording').onclick = () => {
+                        mediaRecorder.stop();
+                        console.log('MediaRecorder stopped', mediaRecorder);
+                        document.getElementById('startRecording').disabled = false;
+                        document.getElementById('stopRecording').disabled = true;
+                    };
+                })
+                .catch(function(error) {
+                    console.error("Error getting user media: ", error);
+                });
+            }
+
+            function handleDataAvailable(event) {
+                if (event.data && event.data.size > 0) {
+                    recordedBlobs.push(event.data);
+                }
+            }
+
+            function uploadVideo(blob) {
+                const formData = new FormData();
+                formData.append('video', blob, 'recorded_video.webm');
+
+                fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.text())
+                .then(data => {
+                    console.log('Upload successful:', data);
+                })
+                .catch(error => {
+                    console.error('Error uploading video:', error);
+                });
+            }
+        }
+    </script>
+</body>
+</html>
